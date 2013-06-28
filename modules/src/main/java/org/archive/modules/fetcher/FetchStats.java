@@ -27,6 +27,7 @@ import org.apache.commons.httpclient.HttpStatus;
 import org.archive.modules.CrawlURI;
 import org.archive.modules.deciderules.recrawl.IdenticalDigestDecideRule;
 import org.archive.util.ArchiveUtils;
+import org.archive.util.ReportUtils;
 import org.archive.util.Reporter;
 
 /**
@@ -71,6 +72,9 @@ public class FetchStats implements Serializable, FetchStatusCodes, Reporter {
     
     protected long lastSuccessTime; 
     
+    /*
+     * XXX redundancy with StatisticsTracker.onApplicationEvent() ... CrawledBytesHistotable.accumulate() code path
+     */
     public synchronized void tally(CrawlURI curi, Stage stage) {
         switch(stage) {
             case SCHEDULED:
@@ -90,7 +94,10 @@ public class FetchStats implements Serializable, FetchStatusCodes, Reporter {
                 if (curi.getFetchStatus() == HttpStatus.SC_NOT_MODIFIED) {
                     notModifiedBytes += curi.getContentSize();
                     notModifiedUrls++;
-                } else if (IdenticalDigestDecideRule.hasIdenticalDigest(curi)){
+                } else if (IdenticalDigestDecideRule.hasIdenticalDigest(curi)) {
+                    dupByHashBytes += curi.getContentSize();
+                    dupByHashUrls++;
+                } else if (curi.getAnnotations().contains("duplicate:uriAgnosticDigest")) {
                     dupByHashBytes += curi.getContentSize();
                     dupByHashUrls++;
                 } else {
@@ -204,7 +211,7 @@ public class FetchStats implements Serializable, FetchStatusCodes, Reporter {
     }
 
     public String shortReportLine() {
-        return ArchiveUtils.shortReportLine(this);
+        return ReportUtils.shortReportLine(this);
     }
 
     @Override

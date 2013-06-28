@@ -26,9 +26,12 @@ import static org.archive.modules.CoreAttributeConstants.A_FETCH_COMPLETED_TIME;
 import static org.archive.modules.CoreAttributeConstants.A_FORCE_RETIRE;
 import static org.archive.modules.CoreAttributeConstants.A_HERITABLE_KEYS;
 import static org.archive.modules.CoreAttributeConstants.A_HTML_BASE;
+import static org.archive.modules.CoreAttributeConstants.A_HTTP_AUTH_CHALLENGES;
 import static org.archive.modules.CoreAttributeConstants.A_NONFATAL_ERRORS;
 import static org.archive.modules.CoreAttributeConstants.A_PREREQUISITE_URI;
 import static org.archive.modules.CoreAttributeConstants.A_SOURCE_TAG;
+import static org.archive.modules.CoreAttributeConstants.A_SUBMIT_DATA;
+import static org.archive.modules.CoreAttributeConstants.A_WARC_RESPONSE_HEADERS;
 import static org.archive.modules.SchedulingConstants.NORMAL;
 import static org.archive.modules.fetcher.FetchStatusCodes.S_BLOCKED_BY_CUSTOM_PROCESSOR;
 import static org.archive.modules.fetcher.FetchStatusCodes.S_BLOCKED_BY_USER;
@@ -54,6 +57,7 @@ import static org.archive.modules.fetcher.FetchStatusCodes.S_TOO_MANY_LINK_HOPS;
 import static org.archive.modules.fetcher.FetchStatusCodes.S_TOO_MANY_RETRIES;
 import static org.archive.modules.fetcher.FetchStatusCodes.S_UNATTEMPTED;
 import static org.archive.modules.fetcher.FetchStatusCodes.S_UNFETCHABLE_URI;
+import static org.archive.modules.recrawl.RecrawlAttributeConstants.A_CONTENT_DIGEST_HISTORY;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -65,6 +69,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -89,9 +94,9 @@ import org.archive.net.UURI;
 import org.archive.net.UURIFactory;
 import org.archive.spring.OverlayContext;
 import org.archive.spring.OverlayMapsSource;
-import org.archive.util.ArchiveUtils;
 import org.archive.util.Base32;
 import org.archive.util.Recorder;
+import org.archive.util.ReportUtils;
 import org.archive.util.Reporter;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -227,9 +232,9 @@ implements Reporter, Serializable, OverlayContext {
      * test must not throw it out because its not a login curi).
      */
     private boolean prerequisite = false;
-
     
-    transient private FetchType fetchType = FetchType.UNKNOWN;
+    /** specified fetch-type: GET, POST, or not-yet-known */ 
+    private FetchType fetchType = FetchType.UNKNOWN;
 
     transient private HttpMethod method = null;
     
@@ -249,7 +254,7 @@ implements Reporter, Serializable, OverlayContext {
      */
     private static final Collection<String> persistentKeys
      = new CopyOnWriteArrayList<String>(
-            new String [] {A_CREDENTIALS_KEY});
+            new String [] {A_CREDENTIALS_KEY, A_HTTP_AUTH_CHALLENGES, A_SUBMIT_DATA, A_WARC_RESPONSE_HEADERS});
 
     /** maximum length for pathFromSeed/hopsPath; longer truncated with leading counter **/ 
     private static final int MAX_HOPS_DISPLAYED = 50;
@@ -281,7 +286,7 @@ implements Reporter, Serializable, OverlayContext {
             UURIFactory.getInstance(args[2].toString()):
             null;
         LinkContext viaContext = (args.length > 3 && args[2].length()>1) ?
-                new HTMLLinkContext(args[3].toString()): null;
+                HTMLLinkContext.get(args[3].toString()): null;
         CrawlURI caUri = new CrawlURI(u, pathFromSeed, via, viaContext);
         return caUri;
     }
@@ -650,12 +655,12 @@ implements Reporter, Serializable, OverlayContext {
      */
     public Collection<String> getAnnotations() {
         @SuppressWarnings("unchecked")
-        List<String> list = (List<String>)getData().get(A_ANNOTATIONS);
-        if (list == null) {
-            list = new ArrayList<String>();
-            getData().put(A_ANNOTATIONS, list);
+        Collection<String> annotations = (Collection<String>)getData().get(A_ANNOTATIONS);
+        if (annotations == null) {
+            annotations = new LinkedHashSet<String>();
+            getData().put(A_ANNOTATIONS, annotations);
         }
-        return list;
+        return annotations;
     }
 
     /**
@@ -1080,9 +1085,9 @@ implements Reporter, Serializable, OverlayContext {
      * The LinksScoper processor converts Link instances in this collection
      * to CrawlURI instances. 
      */
-    protected transient Collection<Link> outLinks = new HashSet<Link>();
+    protected transient Collection<Link> outLinks = new LinkedHashSet<Link>();
     
-    protected transient Collection<CrawlURI> outCandidates = new HashSet<CrawlURI>();
+    protected transient Collection<CrawlURI> outCandidates = new LinkedHashSet<CrawlURI>();
     
     /**
      * Returns discovered links.  The returned collection might be empty if
@@ -1312,6 +1317,20 @@ implements Reporter, Serializable, OverlayContext {
         }
         return data;
     }
+    
+    /**
+     * Convenience method: return (creating if necessary) list at 
+     * given data key
+     * @param key
+     * @return List
+     */
+    @SuppressWarnings("unchecked")
+    public List<Object> getDataList(String key) {
+        if (!containsDataKey(key)) {
+            getData().put(key, new ArrayList<Object>());
+        }
+        return (List<Object>) getData().get(key);
+    }
 
     /**
      * Set the <tt>isSeed</tt> attribute of this URI.
@@ -1353,6 +1372,11 @@ implements Reporter, Serializable, OverlayContext {
      */
     public String getPathFromSeed() {
         return this.pathFromSeed;
+    }
+    
+    /** convenience access to last hop character, as string */
+    public String getLastHop() {
+        return StringUtils.isEmpty(pathFromSeed) ? "" : pathFromSeed.substring(pathFromSeed.length()-1);
     }
 
     /**
@@ -1415,7 +1439,7 @@ implements Reporter, Serializable, OverlayContext {
     //
 
     public String shortReportLine() {
-        return ArchiveUtils.shortReportLine(this);
+        return ReportUtils.shortReportLine(this);
     }
     
     @Override
@@ -1625,6 +1649,9 @@ implements Reporter, Serializable, OverlayContext {
                 extendHopsPath(getPathFromSeed(),link.getHopType().getHopChar()),
                 getUURI(), link.getContext());
         newCaURI.inheritFrom(this);
+        if (link.hasData()) {
+            newCaURI.data = link.getData();
+        }
         return newCaURI;
     }
 
@@ -1832,6 +1859,9 @@ implements Reporter, Serializable, OverlayContext {
         kryo.autoregister(java.util.HashMap[].class); 
         kryo.autoregister(org.archive.modules.credential.HttpAuthenticationCredential.class);
         kryo.autoregister(org.archive.modules.credential.HtmlFormCredential.class);
+        kryo.autoregister(org.apache.commons.httpclient.NameValuePair.class);
+        kryo.autoregister(org.apache.commons.httpclient.NameValuePair[].class);
+        kryo.autoregister(FetchType.class);
         kryo.setRegistrationOptional(true);
     }
     
@@ -1847,14 +1877,9 @@ implements Reporter, Serializable, OverlayContext {
      */
     public CrawlURI markPrerequisite(String preq) 
     throws URIException {
-        UURI src = getUURI();
-        UURI dest = UURIFactory.getInstance(preq);
-        LinkContext lc = LinkContext.PREREQ_MISC;
-        Hop hop = Hop.PREREQ;
-        Link link = new Link(src, dest, lc, hop);
-        CrawlURI caUri = createCrawlURI(getBaseURI(), link);
+        CrawlURI caUri = makeConsequentCandidate(preq, LinkContext.PREREQ_MISC, Hop.PREREQ);
         caUri.setPrerequisite(true);
-        // TODO: consider moving some of this to candidate-handling
+        // TODO: consider moving some of this to configurable candidate-handling
         int prereqPriority = getSchedulingDirective() - 1;
         if (prereqPriority < 0) {
             prereqPriority = 0;
@@ -1868,10 +1893,54 @@ implements Reporter, Serializable, OverlayContext {
         
         return caUri;
     }
+    
+    /**
+     * Create a consequent CrawlURI from this one, given the 
+     * additional parameters
+     *
+     * @param destination URI string
+     * @param lc LinkContext
+     * @param hop Hop 
+     * @return the newly created prerequisite CrawlURI
+     * @throws URIException
+     */
+    public CrawlURI makeConsequentCandidate(String destination, LinkContext lc, Hop hop) 
+    throws URIException {
+        UURI src = getUURI();
+        UURI dest = UURIFactory.getInstance(getBaseURI(),destination);
+        Link link = new Link(src, dest, lc, hop);
+        CrawlURI caUri = createCrawlURI(getBaseURI(), link);
+        return caUri;
+    }
 
     public boolean containsContentTypeCharsetDeclaration() {
         // TODO can this regex be improved? should the test consider if its legal? 
         return getContentType().matches("(?i).*charset=.*");
+    }
+
+    @SuppressWarnings("unchecked")
+    public Map<String,String> getHttpAuthChallenges() {
+        return (Map<String, String>) getData().get(A_HTTP_AUTH_CHALLENGES);
+    }
+
+    public void setHttpAuthChallenges(Map<String, String> httpAuthChallenges) {
+        getData().put(A_HTTP_AUTH_CHALLENGES, httpAuthChallenges);
+    }
+
+    public HashMap<String, Object> getContentDigestHistory() {
+        @SuppressWarnings("unchecked")
+        HashMap<String, Object> contentDigestHistory = (HashMap<String, Object>) getData().get(A_CONTENT_DIGEST_HISTORY);
+        
+        if (contentDigestHistory == null) {
+            contentDigestHistory = new HashMap<String, Object>();
+            getData().put(A_CONTENT_DIGEST_HISTORY, contentDigestHistory);
+        }
+        
+        return contentDigestHistory;
+    }
+
+    public boolean hasContentDigestHistory() {
+        return getData().get(A_CONTENT_DIGEST_HISTORY) != null;
     }
 
 }

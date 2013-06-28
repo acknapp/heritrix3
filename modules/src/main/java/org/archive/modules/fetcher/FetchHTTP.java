@@ -69,14 +69,15 @@ import org.apache.commons.httpclient.HttpState;
 import org.apache.commons.httpclient.HttpStatus;
 import org.apache.commons.httpclient.HttpVersion;
 import org.apache.commons.httpclient.NTCredentials;
+import org.apache.commons.httpclient.NameValuePair;
 import org.apache.commons.httpclient.URIException;
 import org.apache.commons.httpclient.auth.AuthChallengeParser;
+import org.apache.commons.httpclient.auth.AuthPolicy;
 import org.apache.commons.httpclient.auth.AuthScheme;
 import org.apache.commons.httpclient.auth.AuthScope;
-import org.apache.commons.httpclient.auth.BasicScheme;
-import org.apache.commons.httpclient.auth.DigestScheme;
 import org.apache.commons.httpclient.auth.MalformedChallengeException;
 import org.apache.commons.httpclient.cookie.CookiePolicy;
+import org.apache.commons.httpclient.methods.PostMethod;
 import org.apache.commons.httpclient.params.HttpClientParams;
 import org.apache.commons.httpclient.params.HttpConnectionManagerParams;
 import org.apache.commons.httpclient.params.HttpMethodParams;
@@ -92,7 +93,9 @@ import org.archive.httpclient.SingleHttpConnectionManager;
 import org.archive.io.RecorderLengthExceededException;
 import org.archive.io.RecorderTimeoutException;
 import org.archive.io.RecorderTooMuchHeaderException;
+import org.archive.modules.CoreAttributeConstants;
 import org.archive.modules.CrawlURI;
+import org.archive.modules.CrawlURI.FetchType;
 import org.archive.modules.ProcessResult;
 import org.archive.modules.Processor;
 import org.archive.modules.credential.Credential;
@@ -317,7 +320,7 @@ public class FetchHTTP extends Processor implements Lifecycle {
         setSslTrustLevel(TrustLevel.OPEN);
     }
     public TrustLevel getSslTrustLevel() {
-        return (TrustLevel) kp.get("trustLevel");
+        return (TrustLevel) kp.get("sslTrustLevel");
     }
     public void setSslTrustLevel(TrustLevel trustLevel) {
         kp.put("sslTrustLevel",trustLevel);
@@ -506,12 +509,11 @@ public class FetchHTTP extends Processor implements Lifecycle {
      * Local IP address or hostname to use when making connections (binding
      * sockets). When not specified, uses default local address(es).
      */
-    protected String httpBindAddress = "";
     public String getHttpBindAddress(){
-        return this.httpBindAddress;
+        return (String) kp.get(HTTP_BIND_ADDRESS);
     }
     public void setHttpBindAddress(String address) {
-        this.httpBindAddress = address;
+        kp.put(HTTP_BIND_ADDRESS, address);
     }
     public static final String HTTP_BIND_ADDRESS = "httpBindAddress";
 
@@ -632,6 +634,17 @@ public class FetchHTTP extends Processor implements Lifecycle {
         boolean addedCredentials = populateCredentials(curi, method);
         if (http.getState().getProxyCredentials(new AuthScope(getProxyHost(), getProxyPort())) != null) {
             addedCredentials = true;
+        }
+        
+        // prep POST submit-data, if present
+        if (curi.getFetchType()==FetchType.HTTP_POST 
+                && curi.getData().containsKey(CoreAttributeConstants.A_SUBMIT_DATA)) {
+            if (method instanceof PostMethod) {
+                ((PostMethod)method).setRequestBody(
+                    (NameValuePair[]) curi.getData().get(CoreAttributeConstants.A_SUBMIT_DATA));
+            } else {
+                logger.severe("method type mismatch");
+            }
         }
 
         // set hardMax on bytes (if set by operator)
@@ -1146,7 +1159,7 @@ public class FetchHTTP extends Processor implements Lifecycle {
         if (server.hasCredentials()) {
             for (Credential cred : server.getCredentials()) {
                 if (cred.isEveryTime()) {
-                    cred.populate(curi, this.http, method);
+                    cred.populate(curi, this.http, method, server.getHttpAuthChallenges());
                 }
             }
         }
@@ -1157,7 +1170,7 @@ public class FetchHTTP extends Processor implements Lifecycle {
         // by the handle401 method if its a rfc2617 or it'll have been set into
         // the curi by the preconditionenforcer as this login uri came through.
         for (Credential c: curi.getCredentials()) {
-            if (c.populate(curi, this.http, method)) {
+            if (c.populate(curi, this.http, method, curi.getHttpAuthChallenges())) {
                 result = true;
             }
         }
@@ -1186,6 +1199,7 @@ public class FetchHTTP extends Processor implements Lifecycle {
                 CrawlServer cs = serverCache.getServerFor(cd);
                 if (cs != null) {
                     cs.addCredential(c);
+                    cs.setHttpAuthChallenges(curi.getHttpAuthChallenges());
                 }
             }
         }
@@ -1270,39 +1284,42 @@ public class FetchHTTP extends Processor implements Lifecycle {
             return null;
         }
 
-        Map<String, String> authschemes = null;
+        Map<String, String> authChallenges = null;
         try {
             @SuppressWarnings("unchecked")
             Map<String, String> parsedChallenges = AuthChallengeParser.parseChallenges(headers);
-            authschemes = parsedChallenges;
+            authChallenges = parsedChallenges;
+            
+            // remember WWW-Authenticate headers for later use 
+            curi.setHttpAuthChallenges(authChallenges);
         } catch (MalformedChallengeException e) {
             logger.fine("Failed challenge parse: " + e.getMessage());
         }
-        if (authschemes == null || authschemes.size() <= 0) {
+        if (authChallenges == null || authChallenges.size() <= 0) {
             logger.fine("We got a 401 and WWW-Authenticate challenge"
                     + " but failed parse of the header " + curi.toString());
             return null;
         }
 
+        // XXX there's a lot of overlap below with AuthChallengeProcessor.processChallenge()
+        
         AuthScheme result = null;
         // Use the first auth found.
-        for (Iterator<String> i = authschemes.keySet().iterator(); result == null
+        for (Iterator<String> i = authChallenges.keySet().iterator(); result == null
                 && i.hasNext();) {
             String key = (String) i.next();
-            String challenge = (String) authschemes.get(key);
+            String challenge = (String) authChallenges.get(key);
             if (key == null || key.length() <= 0 || challenge == null
                     || challenge.length() <= 0) {
                 logger.warning("Empty scheme: " + curi.toString() + ": "
                         + Arrays.toString(headers));
                 continue;
             }
-            AuthScheme authscheme = null;
-            if (key.equals("basic")) {
-                authscheme = new BasicScheme();
-            } else if (key.equals("digest")) {
-                authscheme = new DigestScheme();
-            } else {
-                logger.fine("Unsupported scheme: " + key);
+            AuthScheme authscheme;
+            try {
+                authscheme = AuthPolicy.getAuthScheme(key);
+            } catch (IllegalStateException e) {
+                logger.info("Unsupported auth scheme '" + key + "' at " + curi + " - " + e);
                 continue;
             }
 
@@ -1357,14 +1374,13 @@ public class FetchHTTP extends Processor implements Lifecycle {
         }
         super.start();
         
+        setSSLFactory();
         configureHttp();
 
         if (cookieStorage != null) {     
             cookieStorage.start(); 
             http.getState().setCookiesMap(cookieStorage.getCookiesMap());
         }
-
-        setSSLFactory();
     }
     
     public boolean isRunning() {
@@ -1450,8 +1466,6 @@ public class FetchHTTP extends Processor implements Lifecycle {
         hcp.setSoTimeout(timeout);
         // Set client to be version 1.0.
         hcp.setVersion(HttpVersion.HTTP_1_0);
-        // We handle 401s, so when we do auth, we want it preemptive.
-        hcp.setAuthenticationPreemptive(true);
 
         // configureHttpCookies(defaults);
 

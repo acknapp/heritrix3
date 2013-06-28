@@ -21,8 +21,9 @@ package org.archive.modules.extractor;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
-import java.util.Collections;
+import java.nio.charset.Charset;
 
 import org.archive.modules.CrawlURI;
 import org.archive.modules.ProcessorTestBase;
@@ -121,16 +122,19 @@ public abstract class ContentExtractorTestBase extends ProcessorTestBase {
      */
     protected static void assertNoSideEffects(CrawlURI uri) {
         assertEquals(0, uri.getNonFatalFailures().size());
-        assertEquals(Collections.EMPTY_LIST, uri.getAnnotations());        
+        assertTrue(uri.getAnnotations().isEmpty());
     }
     
+    @Deprecated
+    public static Recorder createRecorder(String content) throws IOException {
+        return createRecorder(content, Charset.defaultCharset().name());
+    }
     
-    
-    public static Recorder createRecorder(String content)  
-    throws Exception {
+    public static Recorder createRecorder(String content, String charset)
+            throws IOException {
         File temp = File.createTempFile("test", ".tmp");
         Recorder recorder = new Recorder(temp, 1024, 1024);
-        byte[] b = content.getBytes(); // FIXME: Allow other encodings?
+        byte[] b = content.getBytes(charset);
         ByteArrayInputStream bais = new ByteArrayInputStream(b);
         InputStream is = recorder.inputWrap(bais);
         for (int x = is.read(); x >= 0; x = is.read());

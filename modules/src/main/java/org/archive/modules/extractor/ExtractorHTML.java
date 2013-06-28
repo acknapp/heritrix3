@@ -67,8 +67,6 @@ public class ExtractorHTML extends ContentExtractor implements InitializingBean 
     private static Logger logger =
         Logger.getLogger(ExtractorHTML.class.getName());
 
-    
-    
     private final static String MAX_ELEMENT_REPLACE = "MAX_ELEMENT";
     
     private final static String MAX_ATTR_NAME_REPLACE = "MAX_ATTR_NAME";
@@ -76,6 +74,8 @@ public class ExtractorHTML extends ContentExtractor implements InitializingBean 
     private final static String MAX_ATTR_VAL_REPLACE = "MAX_ATTR_VAL";
 
     public final static String A_META_ROBOTS = "meta-robots";
+    
+    public final static String A_FORM_OFFSETS = "form-offsets";
     
     {
         setMaxElementLength(64); 
@@ -321,13 +321,26 @@ public class ExtractorHTML extends ContentExtractor implements InitializingBean 
      * CrawlMetadata provides the robots honoring policy to use when 
      * considering a robots META tag.
      */
-    CrawlMetadata metadata;
+    protected CrawlMetadata metadata;
     public CrawlMetadata getMetadata() {
         return metadata;
     }
     @Autowired
     public void setMetadata(CrawlMetadata provider) {
         this.metadata = provider;
+    }
+    
+    /**
+     * Javascript extractor to use to process inline javascript. Autowired if
+     * available. If null, links will not be extracted from inline javascript.
+     */
+    transient protected ExtractorJS extractorJS;
+    public ExtractorJS getExtractorJS() {
+        return extractorJS;
+    }
+    @Autowired
+    public void setExtractorJS(ExtractorJS extractorJS) {
+        this.extractorJS = extractorJS;
     }
     
     // TODO: convert to Strings
@@ -530,7 +543,7 @@ public class ExtractorHTML extends ContentExtractor implements InitializingBean 
                     DevUtils.extraInfo(), e);
             }
         }
-        
+           
         // finish handling form action, now method is available
         if(action != null) {
             if(method == null || "GET".equalsIgnoreCase(method.toString()) 
@@ -606,9 +619,9 @@ public class ExtractorHTML extends ContentExtractor implements InitializingBean 
      * @param cs    CharSequence of javascript code
      */
     protected void processScriptCode(CrawlURI curi, CharSequence cs) {
-        if (getExtractJavascript()) {
+        if (getExtractorJS() != null && getExtractJavascript()) {
             numberOfLinksExtracted.addAndGet(
-                ExtractorJS.considerStrings(this, curi, cs, false));
+                getExtractorJS().considerStrings(this, curi, cs));
         }
     }
 
@@ -641,7 +654,7 @@ public class ExtractorHTML extends ContentExtractor implements InitializingBean 
             // the underlying ReplayCharSequence and the link its about
             // to become a part of is expected to outlive the current
             // ReplayCharSequence.
-            HTMLLinkContext hc = new HTMLLinkContext(context.toString());
+            HTMLLinkContext hc = HTMLLinkContext.get(context.toString());
             int max = getExtractorParameters().getMaxOutlinks();
             Link.addRelativeToBase(curi, max, uri.toString(), hc, hop);
         } catch (URIException e) {
@@ -809,9 +822,16 @@ public class ExtractorHTML extends ContentExtractor implements InitializingBean 
                 int end6 = tags.end(6);
                 assert start6 >= 0: "Start is: " + start6 + ", " + curi;
                 assert end6 >= 0: "End is :" + end6 + ", " + curi;
+                String element = cs.subSequence(start6, end6).toString();
+                CharSequence attributes = cs.subSequence(start5, end5);
                 processGeneralTag(curi,
-                    cs.subSequence(start6, end6),
-                    cs.subSequence(start5, end5));
+                    element,
+                    attributes);
+                // remember FORM to help later extra processing
+                if ("form".equalsIgnoreCase(element)) {
+                    curi.getDataList(A_FORM_OFFSETS).add((Integer)(start6-1));
+                }
+               
 
             } else if (tags.start(1) > 0) {
                 // <script> match
